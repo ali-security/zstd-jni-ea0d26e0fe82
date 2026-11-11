@@ -1,5 +1,5 @@
 name: "CI qemu cross"
-on: [push, pull_request]
+on: [workflow_dispatch]
 jobs:
     qemu-cross:
         strategy:
@@ -7,7 +7,9 @@ jobs:
                 include: [
                     { platform: s390x }
                 ]
-        runs-on: ubuntu-latest
+        # ubuntu-latest is now ubuntu-26.04, where the qemu container cannot resolve ports.ubuntu.com
+        runs-on: ubuntu-24.04
+        timeout-minutes: 50
         steps:
         - uses: actions/checkout@v4
         - uses: docker/setup-qemu-action@v3
