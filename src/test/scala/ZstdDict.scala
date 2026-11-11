@@ -944,4 +944,62 @@ class ZstdDictSpec extends AnyFlatSpec {
   "ZstdBufferDecompressingStreamNoFinalizer" should "refuse to configure a closed stream" in {
     refuseToConfigureClosedBufferStream(new ZstdBufferDecompressingStreamNoFinalizer(ByteBuffer.allocate(0)))
   }
+
+  // a direct samples buffer exactly filled with `sampleSize` samples of 1024 bytes
+  def directSamples(sampleSize: Int): (ByteBuffer, Array[Int]) = {
+    val samples = ByteBuffer.allocateDirect(1024 * sampleSize)
+    val sizes = new Array[Int](sampleSize)
+    for ((sample, i) <- source.sliding(1024, 1024).take(sampleSize).map(_.toArray).zipWithIndex) {
+      samples.put(sample)
+      sizes(i) = sample.length
+    }
+    assert(samples.position() == samples.capacity())
+    (samples, sizes)
+  }
+
+  // sample sizes that make the native trainer read outside of the samples buffer
+  val invalidSampleSizes: List[(String, Array[Int] => Array[Int])] = List(
+    ("the last sample overrunning the samples buffer by one byte", (s: Array[Int]) => s.updated(s.length - 1, s.last + 1)),
+    ("an extra sample overrunning the samples buffer by one byte", (s: Array[Int]) => s :+ 1),
+    ("a sample larger than the samples buffer",                    (s: Array[Int]) => s.updated(0, Int.MaxValue)),
+    ("a negative sample size",                                     (s: Array[Int]) => s.updated(0, -1)),
+    ("a negative sample size compensated by a larger one",         (s: Array[Int]) => s.updated(0, -1).updated(1, s(1) + 1)),
+    ("sample sizes whose sum wraps around on 32-bit platforms",    (s: Array[Int]) => s.updated(0, Int.MaxValue).updated(1, Int.MaxValue).updated(2, 2))
+  )
+
+  for {
+    legacy <- legacyS
+    (description, invalidate) <- invalidSampleSizes
+  } {
+    "Zstd" should s"reject $description when training a dict from direct buffers with legacy $legacy" in {
+      val (samples, sizes) = directSamples(512)
+      val dictBuffer = ByteBuffer.allocateDirect(32 * 512)
+      val result = Zstd.trainFromBufferDirect(samples, invalidate(sizes), dictBuffer, legacy)
+      assert(Zstd.isError(result), s"trained a dict of $result bytes")
+      assert(Zstd.getErrorCode(result) == Zstd.errSrcSizeWrong())
+    }
+  }
+
+  for (legacy <- legacyS) {
+    "Zstd" should s"train a dict from samples exactly filling the direct samples buffer with legacy $legacy" in {
+      val (samples, sizes) = directSamples(512)
+      val dictBuffer = ByteBuffer.allocateDirect(32 * 512)
+      val result = Zstd.trainFromBufferDirect(samples, sizes, dictBuffer, legacy)
+      assert(!Zstd.isError(result), Zstd.getErrorName(result))
+      val dict = new Array[Byte](result.toInt)
+      dictBuffer.get(dict)
+      assert(Zstd.getDictIdFromDict(dict) != 0)
+    }
+  }
+
+  "Zstd" should "refuse to train a dict from non-direct buffers" in {
+    val (samples, sizes) = directSamples(512)
+    val heapSamples = ByteBuffer.allocate(samples.capacity())
+    val noSamples = Zstd.trainFromBufferDirect(heapSamples, sizes, ByteBuffer.allocateDirect(32 * 512), false)
+    assert(Zstd.isError(noSamples))
+    assert(Zstd.getErrorCode(noSamples) == Zstd.errSrcSizeWrong())
+    val noDict = Zstd.trainFromBufferDirect(samples, sizes, ByteBuffer.allocate(32 * 512), false)
+    assert(Zstd.isError(noDict))
+    assert(Zstd.getErrorCode(noDict) == Zstd.errDstBufferNull())
+  }
 }

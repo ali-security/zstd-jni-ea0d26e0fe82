@@ -60,8 +60,17 @@ JNIEXPORT jlong Java_com_github_luben_zstd_Zstd_trainFromBufferDirect0
 
     size_t size = 0;
     void *samples_buffer = (*env)->GetDirectBufferAddress(env, samples);
+    size_t samples_capacity = (*env)->GetDirectBufferCapacity(env, samples);
     void *dict_buff = (*env)->GetDirectBufferAddress(env, dictBuffer);
     size_t dict_capacity = (*env)->GetDirectBufferCapacity(env, dictBuffer);
+    if (samples_buffer == NULL) {
+        size = (size_t) -ZSTD_error_srcSize_wrong;
+        goto E1;
+    }
+    if (dict_buff == NULL) {
+        size = (size_t) -ZSTD_error_dstBuffer_null;
+        goto E1;
+    }
 
     /* convert sized from int to size_t */
     jsize num_samples = (*env)->GetArrayLength(env, sampleSizes);
@@ -73,7 +82,15 @@ JNIEXPORT jlong Java_com_github_luben_zstd_Zstd_trainFromBufferDirect0
     }
     jint *sample_sizes_array = (*env)->GetPrimitiveArrayCritical(env, sampleSizes, NULL);
     if (sample_sizes_array == NULL) goto E2;
+    size_t total_samples_size = 0;
     for (int i = 0; i < num_samples; i++) {
+        if (sample_sizes_array[i] < 0 ||
+            (size_t) sample_sizes_array[i] > samples_capacity - total_samples_size) {
+            (*env)->ReleasePrimitiveArrayCritical(env, sampleSizes, sample_sizes_array, JNI_ABORT);
+            size = (size_t) -ZSTD_error_srcSize_wrong;
+            goto E2;
+        }
+        total_samples_size += (size_t) sample_sizes_array[i];
         samples_sizes[i] = sample_sizes_array[i];
     }
     (*env)->ReleasePrimitiveArrayCritical(env, sampleSizes, sample_sizes_array, JNI_ABORT);
