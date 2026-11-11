@@ -468,4 +468,96 @@ class ZstdDictSpec extends AnyFlatSpec {
     assert(Zstd.getDictIdFromFrame(compressed) == Zstd.getDictIdFromDict(dict))
     assert(input.toSeq == decompressed.toSeq)
   }
+
+  "ZstdInputStreamNoFinalizer" should "refuse to configure a closed stream" in {
+    val dict  = train(false, 512)
+    val ddict = new ZstdDictDecompress(dict)
+    val zis   = new ZstdInputStreamNoFinalizer(new ByteArrayInputStream(Array[Byte]()))
+    zis.setDict(ddict)
+    zis.close
+    // the native stream has been freed, none of these may reach it
+    val setters: List[(String, () => Any)] = List(
+      "setDict(byte[])"             -> (() => zis.setDict(dict)),
+      "setDict(ZstdDictDecompress)" -> (() => zis.setDict(ddict)),
+      "setLongMax"                  -> (() => zis.setLongMax(20)),
+      "setRefMultipleDDicts"        -> (() => zis.setRefMultipleDDicts(true))
+    )
+    for ((name, setter) <- setters) {
+      val e = intercept[IOException] {
+        setter()
+      }
+      assert(e.getMessage == "Stream closed", s"$name on a closed stream")
+    }
+    // closing the stream released the dict and the refused setDict did not acquire it again
+    ddict.close
+  }
+
+  "ZstdOutputStreamNoFinalizer" should "refuse to configure a closed stream" in {
+    val dict  = train(false, 512)
+    val cdict = new ZstdDictCompress(dict, 1)
+    val zos   = new ZstdOutputStreamNoFinalizer(new ByteArrayOutputStream(), 1)
+    zos.setCloseFrameOnFlush(true)
+    zos.setDict(cdict)
+    zos.write(input, 0, 1024)
+    // flushing closes the frame, so after close() only the closed-stream check
+    // stands between the setters and the freed native stream
+    zos.flush
+    zos.close
+    val setters: List[(String, () => Any)] = List(
+      "setChecksum"               -> (() => zos.setChecksum(true)),
+      "setLevel"                  -> (() => zos.setLevel(3)),
+      "setLong"                   -> (() => zos.setLong(20)),
+      "setWorkers"                -> (() => zos.setWorkers(0)),
+      "setOverlapLog"             -> (() => zos.setOverlapLog(0)),
+      "setJobSize"                -> (() => zos.setJobSize(0)),
+      "setTargetLength"           -> (() => zos.setTargetLength(0)),
+      "setMinMatch"               -> (() => zos.setMinMatch(4)),
+      "setSearchLog"              -> (() => zos.setSearchLog(1)),
+      "setChainLog"               -> (() => zos.setChainLog(10)),
+      "setHashLog"                -> (() => zos.setHashLog(10)),
+      "setWindowLog"              -> (() => zos.setWindowLog(20)),
+      "setStrategy"               -> (() => zos.setStrategy(1)),
+      "setDict(byte[])"           -> (() => zos.setDict(dict)),
+      "setDict(ZstdDictCompress)" -> (() => zos.setDict(cdict))
+    )
+    for ((name, setter) <- setters) {
+      val e = intercept[IOException] {
+        setter()
+      }
+      assert(e.getMessage == "StreamClosed", s"$name on a closed stream")
+    }
+    // closing the stream released the dict and the refused setDict did not acquire it again
+    cdict.close
+  }
+
+  def refuseToConfigureClosedBufferStream(zis: BaseZstdBufferDecompressingStreamNoFinalizer): Unit = {
+    val dict  = train(false, 512)
+    val ddict = new ZstdDictDecompress(dict)
+    zis.setDict(ddict)
+    zis.close
+    // a closed stream has nothing left to read
+    assert(!zis.hasRemaining)
+    // the native stream has been freed, none of these may reach it
+    val setters: List[(String, () => Any)] = List(
+      "setDict(byte[])"             -> (() => zis.setDict(dict)),
+      "setDict(ZstdDictDecompress)" -> (() => zis.setDict(ddict)),
+      "setLongMax"                  -> (() => zis.setLongMax(20))
+    )
+    for ((name, setter) <- setters) {
+      val e = intercept[IOException] {
+        setter()
+      }
+      assert(e.getMessage == "Stream closed", s"$name on a closed stream")
+    }
+    // closing the stream released the dict and the refused setDict did not acquire it again
+    ddict.close
+  }
+
+  "ZstdDirectBufferDecompressingStreamNoFinalizer" should "refuse to configure a closed stream" in {
+    refuseToConfigureClosedBufferStream(new ZstdDirectBufferDecompressingStreamNoFinalizer(ByteBuffer.allocateDirect(0)))
+  }
+
+  "ZstdBufferDecompressingStreamNoFinalizer" should "refuse to configure a closed stream" in {
+    refuseToConfigureClosedBufferStream(new ZstdBufferDecompressingStreamNoFinalizer(ByteBuffer.allocate(0)))
+  }
 }
