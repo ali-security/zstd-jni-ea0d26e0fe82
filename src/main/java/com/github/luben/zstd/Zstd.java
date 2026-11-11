@@ -865,6 +865,16 @@ public class Zstd {
         if (samples.length <= 10) {
             throw new ZstdException(Zstd.errGeneric(), "nb of samples too low");
         }
+        // FASTCOVER trains on the first ~75% of samples (d defaults to 8); if those sum to
+        // fewer than 8 bytes, nbDmers underflows in the vendored fastcover.c (meta/zstd#4499).
+        if (!legacy) {
+            int nbTrain = (int) (samples.length * 0.75);
+            long trainSize = 0;
+            for (int i = 0; i < nbTrain; i++) trainSize += samples[i].length;
+            if (trainSize < 8) {
+                throw new ZstdException(Zstd.errGeneric(), "training samples too small");
+            }
+        }
         return trainFromBuffer0(samples, dictBuffer, legacy);
     }
     private static native long trainFromBuffer0(byte[][] samples, byte[] dictBuffer, boolean legacy);
@@ -882,6 +892,16 @@ public class Zstd {
     public static long trainFromBufferDirect(ByteBuffer samples, int[] sampleSizes, ByteBuffer dictBuffer, boolean legacy) {
         if (sampleSizes.length <= 10) {
             throw new ZstdException(Zstd.errGeneric(), "nb of samples too low");
+        }
+        // FASTCOVER trains on the first ~75% of samples (d defaults to 8); if those sum to
+        // fewer than 8 bytes, nbDmers underflows in the vendored fastcover.c (meta/zstd#4499).
+        if (!legacy) {
+            int nbTrain = (int) (sampleSizes.length * 0.75);
+            long trainSize = 0;
+            for (int i = 0; i < nbTrain; i++) trainSize += sampleSizes[i];
+            if (trainSize < 8) {
+                throw new ZstdException(Zstd.errGeneric(), "training samples too small");
+            }
         }
         return trainFromBufferDirect0(samples, sampleSizes, dictBuffer, legacy);
     }
