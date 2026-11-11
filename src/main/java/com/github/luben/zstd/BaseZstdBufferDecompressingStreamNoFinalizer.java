@@ -10,6 +10,8 @@ public abstract class BaseZstdBufferDecompressingStreamNoFinalizer implements Cl
     protected boolean closed = false;
     private boolean finishedFrame = false;
     private boolean streamEnd = false;
+    // Keep reference to the active dict so it is not garbage collected
+    private ZstdDictDecompress active_dict = null;
     /**
      * This field is set by the native call to represent the number of bytes consumed from {@link #source} buffer.
      */
@@ -58,14 +60,15 @@ public abstract class BaseZstdBufferDecompressingStreamNoFinalizer implements Cl
             throw new IOException("Stream closed");
         }
         dict.acquireSharedLock();
-        try {
-            long size = Zstd.loadFastDictDecompress(stream, dict);
-            if (Zstd.isError(size)) {
-                throw new ZstdIOException(size);
-            }
-        } finally {
+        long size = Zstd.loadFastDictDecompress(stream, dict);
+        if (Zstd.isError(size)) {
             dict.releaseSharedLock();
+            throw new ZstdIOException(size);
         }
+        if (active_dict != null) {
+            active_dict.releaseSharedLock();
+        }
+        active_dict = dict;
         return this;
     }
 
@@ -132,6 +135,10 @@ public abstract class BaseZstdBufferDecompressingStreamNoFinalizer implements Cl
             } finally {
                 closed = true;
                 source = null; // help GC with realizing the buffer can be released
+                if (active_dict != null) {
+                    active_dict.releaseSharedLock();
+                    active_dict = null;
+                }
             }
         }
     }

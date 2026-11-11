@@ -36,6 +36,10 @@ public class ZstdDecompressCtx extends AutoCloseBase {
             free(nativePtr);
             nativePtr = 0;
         }
+        if (decompression_dict != null) {
+            decompression_dict.releaseSharedLock();
+            decompression_dict = null;
+        }
     }
 
     /**
@@ -62,12 +66,15 @@ public class ZstdDecompressCtx extends AutoCloseBase {
         try {
             long result = loadDDictFast0(nativePtr, dict);
             if (Zstd.isError(result)) {
+                dict.releaseSharedLock();
                 throw new ZstdException(result);
+            }
+            if (decompression_dict != null) {
+                decompression_dict.releaseSharedLock();
             }
             // keep a reference to the dictionary so it's not garbage collected
             decompression_dict = dict;
         } finally {
-            dict.releaseSharedLock();
             releaseSharedLock();
         }
         return this;
@@ -87,7 +94,10 @@ public class ZstdDecompressCtx extends AutoCloseBase {
             if (Zstd.isError(result)) {
                 throw new ZstdException(result);
             }
-            decompression_dict = null;
+            if (decompression_dict != null) {
+                decompression_dict.releaseSharedLock();
+                decompression_dict = null;
+            }
         } finally {
             releaseSharedLock();
         }
@@ -101,7 +111,16 @@ public class ZstdDecompressCtx extends AutoCloseBase {
      */
     public void reset() {
         ensureOpen();
-        reset0(nativePtr);
+        acquireSharedLock();
+        try {
+            reset0(nativePtr);
+            if (decompression_dict != null) {
+                decompression_dict.releaseSharedLock();
+                decompression_dict = null;
+            }
+        } finally {
+            releaseSharedLock();
+        }
     }
     private static native void reset0(long nativePtr);
 

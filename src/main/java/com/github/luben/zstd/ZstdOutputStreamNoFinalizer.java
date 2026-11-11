@@ -31,6 +31,7 @@ public class ZstdOutputStreamNoFinalizer extends FilterOutputStream {
     private boolean closeFrameOnFlush = false;
     private boolean frameClosed = true;
     private boolean frameStarted = false;
+    private ZstdDictCompress active_dict = null;
 
     /* JNI methods */
     public static native long recommendedCOutSize();
@@ -373,10 +374,18 @@ public class ZstdOutputStreamNoFinalizer extends FilterOutputStream {
         if (!frameClosed) {
             throw new IllegalStateException("Change of parameter on initialized stream");
         }
+        dict.acquireSharedLock();
         int size = Zstd.loadFastDictCompress(stream, dict);
         if (Zstd.isError(size)) {
+            dict.releaseSharedLock();
             throw new ZstdIOException(size);
         }
+        // release the shared lock on the previously used dict (if any)
+        if (active_dict != null) {
+            active_dict.releaseSharedLock();
+        }
+        // keep the dict alive so it's not garbage collected
+        active_dict = dict;
         return this;
     }
 
@@ -486,6 +495,10 @@ public class ZstdOutputStreamNoFinalizer extends FilterOutputStream {
             }
         } finally {
             // release the resources even if underlying stream throw an exception
+            if (active_dict != null) {
+                active_dict.releaseSharedLock();
+                active_dict = null;
+            }
             isClosed = true;
             bufferPool.release(dstByteBuffer);
             freeCStream(stream);

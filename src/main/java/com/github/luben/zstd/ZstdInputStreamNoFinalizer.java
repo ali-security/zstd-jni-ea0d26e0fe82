@@ -5,6 +5,7 @@ import java.io.FilterInputStream;
 import java.io.IOException;
 import java.lang.IndexOutOfBoundsException;
 import java.nio.ByteBuffer;
+import java.util.LinkedList;
 
 import com.github.luben.zstd.util.Native;
 
@@ -37,6 +38,9 @@ public class ZstdInputStreamNoFinalizer extends FilterInputStream {
     private boolean isContinuous = false;
     private boolean frameFinished = true;
     private boolean isClosed = false;
+    private boolean isMultiDict = false;
+    // keep the active dict(s) alive
+    private LinkedList<ZstdDictDecompress> active_dicts = new LinkedList<ZstdDictDecompress>();
 
     /* JNI methods */
     public static native long recommendedDInSize();
@@ -101,14 +105,17 @@ public class ZstdInputStreamNoFinalizer extends FilterInputStream {
             throw new IOException("Stream closed");
         }
         dict.acquireSharedLock();
-        try {
-            int size = Zstd.loadFastDictDecompress(stream, dict);
-            if (Zstd.isError(size)) {
-                throw new ZstdIOException(size);
-            }
-        } finally {
+        int size = Zstd.loadFastDictDecompress(stream, dict);
+        if (Zstd.isError(size)) {
             dict.releaseSharedLock();
+            throw new ZstdIOException(size);
         }
+        // release the shared lock on the previously used dict if not using mulitple dicts (if any)
+        if (!active_dicts.isEmpty() && !isMultiDict) {
+            active_dicts.removeLast().releaseSharedLock();
+        }
+        // keep the dict alive so it's not garbage collected
+        active_dicts.addFirst(dict);
         return this;
     }
 
@@ -130,6 +137,9 @@ public class ZstdInputStreamNoFinalizer extends FilterInputStream {
         int size = Zstd.setRefMultipleDDicts(stream, useMultiple);
         if (Zstd.isError(size)) {
             throw new ZstdIOException(size);
+        }
+        if (useMultiple) {
+            isMultiDict = true;
         }
         return this;
     }
@@ -273,6 +283,9 @@ public class ZstdInputStreamNoFinalizer extends FilterInputStream {
     public synchronized void close() throws IOException {
         if (isClosed) {
             return;
+        }
+        while (active_dicts.size() > 0) {
+            active_dicts.removeLast().releaseSharedLock();
         }
         isClosed = true;
         bufferPool.release(srcByteBuffer);

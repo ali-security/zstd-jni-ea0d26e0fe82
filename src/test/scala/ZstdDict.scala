@@ -33,6 +33,17 @@ class ZstdDictSpec extends AnyFlatSpec {
     bb
   }
 
+  def readFully(is: InputStream): Array[Byte] = {
+    val os  = new ByteArrayOutputStream()
+    val buf = new Array[Byte](16 * 1024)
+    var n   = is.read(buf)
+    while (n >= 0) {
+      os.write(buf, 0, n)
+      n = is.read(buf)
+    }
+    os.toByteArray
+  }
+
   "Zstd" should "report error when failing to make a dict" in {
     val src = source.sliding(28, 28).take(4).map(_.toArray)
     val trainer = new ZstdDictTrainer(1024 * 1024, 32 * 1024)
@@ -427,6 +438,375 @@ class ZstdDictSpec extends AnyFlatSpec {
       zis.close
       assert(input.toSeq == output.toSeq)
     }
+
+    it should s"keep a fast dict alive while it is used by a ZstdInputStream with legacy $legacy" in {
+      val cdict = new ZstdDictCompress(dict, 0, dict.length, 1)
+      val compressed = compressWithDict(cdict)
+      cdict.close
+
+      val ddict = new ZstdDictDecompress(dict)
+      val zis   = new ZstdInputStreamNoFinalizer(new ByteArrayInputStream(compressed))
+      zis.setDict(ddict)
+      // the stream references the native DDict, so freeing it while the
+      // stream is still open must be refused (use after free otherwise)
+      intercept[IllegalStateException] {
+        ddict.close
+      }
+      val output = readFully(zis)
+      zis.close
+      assert(input.toSeq == output.toSeq)
+      // closing the stream releases the dict
+      ddict.close
+    }
+
+    it should s"release the previous fast dict when a ZstdInputStream switches dicts with legacy $legacy" in {
+      val cdict2 = new ZstdDictCompress(dict2, 0, dict2.length, 1)
+      val compressed = compressWithDict(cdict2)
+      cdict2.close
+
+      val ddict  = new ZstdDictDecompress(dict)
+      val ddict2 = new ZstdDictDecompress(dict2)
+      val zis    = new ZstdInputStreamNoFinalizer(new ByteArrayInputStream(compressed))
+      zis.setDict(ddict)
+      zis.setDict(ddict2)
+      // the first dict is no longer referenced by the stream
+      ddict.close
+      // the active one is still in use
+      intercept[IllegalStateException] {
+        ddict2.close
+      }
+      val output = readFully(zis)
+      zis.close
+      ddict2.close
+      assert(input.toSeq == output.toSeq)
+    }
+
+    it should s"keep a fast dict alive while it is used by a ZstdOutputStream with legacy $legacy" in {
+      val cdict = new ZstdDictCompress(dict, 0, dict.length, 1)
+      val os    = new ByteArrayOutputStream()
+      val zos   = new ZstdOutputStreamNoFinalizer(os, 1)
+      zos.setDict(cdict)
+      // the stream references the native CDict, so freeing it while the
+      // stream is still open must be refused (use after free otherwise)
+      intercept[IllegalStateException] {
+        cdict.close
+      }
+      zos.write(input)
+      zos.close
+      // closing the stream releases the dict
+      cdict.close
+      val compressed = os.toByteArray
+      assert(Zstd.getDictIdFromFrame(compressed) == Zstd.getDictIdFromDict(dict))
+
+      val ddict = new ZstdDictDecompress(dict)
+      val decompressed = Zstd.decompress(compressed, ddict, input.length)
+      ddict.close
+      assert(input.toSeq == decompressed.toSeq)
+    }
+
+    it should s"release the previous fast dict when a ZstdOutputStream switches dicts with legacy $legacy" in {
+      val cdict  = new ZstdDictCompress(dict, 0, dict.length, 1)
+      val cdict2 = new ZstdDictCompress(dict2, 0, dict2.length, 1)
+      val os     = new ByteArrayOutputStream()
+      val zos    = new ZstdOutputStreamNoFinalizer(os, 1)
+      zos.setDict(cdict)
+      zos.setDict(cdict2)
+      // the first dict is no longer referenced by the stream
+      cdict.close
+      // the active one is still in use
+      intercept[IllegalStateException] {
+        cdict2.close
+      }
+      zos.write(input)
+      zos.close
+      cdict2.close
+      val compressed = os.toByteArray
+      assert(Zstd.getDictIdFromFrame(compressed) == Zstd.getDictIdFromDict(dict2))
+
+      val ddict2 = new ZstdDictDecompress(dict2)
+      val decompressed = Zstd.decompress(compressed, ddict2, input.length)
+      ddict2.close
+      assert(input.toSeq == decompressed.toSeq)
+    }
+
+    it should s"keep a fast dict alive while it is loaded in a ZstdCompressCtx with legacy $legacy" in {
+      val cdict = new ZstdDictCompress(dict, 0, dict.length, 1)
+      val cctx  = new ZstdCompressCtx()
+      cctx.loadDict(cdict)
+      // the context references the native CDict, so freeing it while the
+      // context is still open must be refused (use after free otherwise)
+      intercept[IllegalStateException] {
+        cdict.close
+      }
+      val compressed = cctx.compress(input)
+      cctx.close
+      // closing the context releases the dict
+      cdict.close
+      assert(Zstd.getDictIdFromFrame(compressed) == Zstd.getDictIdFromDict(dict))
+      val decompressed = Zstd.decompress(compressed, dict, input.length)
+      assert(input.toSeq == decompressed.toSeq)
+    }
+
+    it should s"release the fast dict when a ZstdCompressCtx loads another dict or is reset with legacy $legacy" in {
+      val cdict  = new ZstdDictCompress(dict, 0, dict.length, 1)
+      val cdict2 = new ZstdDictCompress(dict2, 0, dict2.length, 1)
+      val cdict3 = new ZstdDictCompress(dict2, 0, dict2.length, 1)
+      val cctx   = new ZstdCompressCtx()
+      try {
+        cctx.loadDict(cdict)
+        cctx.loadDict(cdict2)
+        // the first dict is no longer referenced by the context
+        cdict.close
+        // the active one is still in use
+        intercept[IllegalStateException] {
+          cdict2.close
+        }
+        val compressed = cctx.compress(input)
+        assert(Zstd.getDictIdFromFrame(compressed) == Zstd.getDictIdFromDict(dict2))
+        // loading a byte[] dict drops the reference to the fast dict
+        cctx.loadDict(dict2)
+        cdict2.close
+        val compressed2 = cctx.compress(input)
+        assert(Zstd.getDictIdFromFrame(compressed2) == Zstd.getDictIdFromDict(dict2))
+        // as does resetting the context
+        cctx.loadDict(cdict3)
+        intercept[IllegalStateException] {
+          cdict3.close
+        }
+        cctx.reset()
+        cdict3.close
+        val compressed3 = cctx.compress(input)
+        assert(Zstd.getDictIdFromFrame(compressed3) == 0)
+      } finally {
+        cctx.close
+      }
+    }
+
+    it should s"keep the loaded fast dict when a ZstdCompressCtx fails to load another one with legacy $legacy" in {
+      val cdict  = new ZstdDictCompress(dict, 0, dict.length, 1)
+      val cdict2 = new ZstdDictCompress(dict2, 0, dict2.length, 1)
+      val cctx   = new ZstdCompressCtx()
+      cctx.loadDict(cdict)
+      // start a frame: the dictionary can not be changed in the middle of it
+      val src = ByteBuffer.allocateDirect(1024)
+      src.put(input, 0, 1024)
+      src.flip()
+      val dst = ByteBuffer.allocateDirect(Zstd.compressBound(1024).toInt)
+      cctx.compressDirectByteBufferStream(dst, src, EndDirective.CONTINUE)
+      intercept[ZstdException] {
+        cctx.loadDict(cdict2)
+      }
+      // the dict that failed to load is not retained by the context
+      cdict2.close
+      // while the previously loaded one is still referenced
+      intercept[IllegalStateException] {
+        cdict.close
+      }
+      cctx.close
+      cdict.close
+    }
+
+    it should s"keep a fast dict alive while it is loaded in a ZstdDecompressCtx with legacy $legacy" in {
+      val compressed = Zstd.compressUsingDict(input, dict, 1)
+      val ddict = new ZstdDictDecompress(dict)
+      val dctx  = new ZstdDecompressCtx()
+      dctx.loadDict(ddict)
+      // the context references the native DDict, so freeing it while the
+      // context is still open must be refused (use after free otherwise)
+      intercept[IllegalStateException] {
+        ddict.close
+      }
+      val decompressed = dctx.decompress(compressed, input.length)
+      dctx.close
+      // closing the context releases the dict
+      ddict.close
+      assert(input.toSeq == decompressed.toSeq)
+    }
+
+    it should s"release the fast dict when a ZstdDecompressCtx loads another dict or is reset with legacy $legacy" in {
+      val compressed2 = Zstd.compressUsingDict(input, dict2, 1)
+      val ddict  = new ZstdDictDecompress(dict)
+      val ddict2 = new ZstdDictDecompress(dict2)
+      val ddict3 = new ZstdDictDecompress(dict2)
+      val dctx   = new ZstdDecompressCtx()
+      try {
+        dctx.loadDict(ddict)
+        dctx.loadDict(ddict2)
+        // the first dict is no longer referenced by the context
+        ddict.close
+        // the active one is still in use
+        intercept[IllegalStateException] {
+          ddict2.close
+        }
+        assert(input.toSeq == dctx.decompress(compressed2, input.length).toSeq)
+        // loading a byte[] dict drops the reference to the fast dict
+        dctx.loadDict(dict2)
+        ddict2.close
+        assert(input.toSeq == dctx.decompress(compressed2, input.length).toSeq)
+        // as does resetting the context
+        dctx.loadDict(ddict3)
+        intercept[IllegalStateException] {
+          ddict3.close
+        }
+        dctx.reset()
+        ddict3.close
+      } finally {
+        dctx.close
+      }
+    }
+
+    it should s"keep a fast dict alive while it is used by a ZstdDirectBufferCompressingStream with legacy $legacy" in {
+      val cdict = new ZstdDictCompress(dict, 0, dict.length, 1)
+      val size  = input.length
+      val os    = ByteBuffer.allocateDirect(Zstd.compressBound(size.toLong).toInt)
+      val ib    = ByteBuffer.allocateDirect(size)
+      ib.put(input)
+      ib.flip
+
+      val osw = new ZstdDirectBufferCompressingStreamNoFinalizer(os, 1)
+      osw.setDict(cdict)
+      // the stream is going to use the native CDict, so freeing it must be refused
+      intercept[IllegalStateException] {
+        cdict.close
+      }
+      osw.compress(ib)
+      // the initialized native stream references the CDict until it is closed
+      intercept[IllegalStateException] {
+        cdict.close
+      }
+      osw.close
+      // closing the stream releases the dict
+      cdict.close
+      os.flip
+
+      assert(Zstd.getDictIdFromFrameBuffer(os) == Zstd.getDictIdFromDict(dict))
+      val compressed = new Array[Byte](os.remaining)
+      os.get(compressed)
+      val decompressed = Zstd.decompress(compressed, dict, size)
+      assert(input.toSeq == decompressed.toSeq)
+    }
+
+    it should s"release the previous fast dict when a ZstdDirectBufferCompressingStream switches dicts with legacy $legacy" in {
+      val cdict  = new ZstdDictCompress(dict, 0, dict.length, 1)
+      val cdict2 = new ZstdDictCompress(dict2, 0, dict2.length, 1)
+      val size   = input.length
+      val os     = ByteBuffer.allocateDirect(Zstd.compressBound(size.toLong).toInt)
+      val ib     = ByteBuffer.allocateDirect(size)
+      ib.put(input)
+      ib.flip
+
+      val osw = new ZstdDirectBufferCompressingStreamNoFinalizer(os, 1)
+      osw.setDict(cdict)
+      osw.setDict(cdict2)
+      // the first dict is no longer referenced by the stream
+      cdict.close
+      // the active one is still in use
+      intercept[IllegalStateException] {
+        cdict2.close
+      }
+      // replacing it with a byte[] dict releases it as well
+      osw.setDict(dict2)
+      cdict2.close
+      osw.compress(ib)
+      osw.close
+      os.flip
+
+      assert(Zstd.getDictIdFromFrameBuffer(os) == Zstd.getDictIdFromDict(dict2))
+    }
+
+    def decompressDirectBufferStream(zis: ZstdDirectBufferDecompressingStreamNoFinalizer): Array[Byte] = {
+      val output = Array.fill[Byte](input.length)(0)
+      val block  = ByteBuffer.allocateDirect(128 * 1024)
+      var offset = 0
+      while (zis.hasRemaining) {
+        block.clear()
+        val read = zis.read(block)
+        block.flip()
+        block.get(output, offset, read)
+        offset += read
+      }
+      output
+    }
+
+    it should s"keep a fast dict alive while it is used by a ZstdDirectBufferDecompressingStream with legacy $legacy" in {
+      val compressed = Zstd.compressUsingDict(input, dict, 1)
+      val src        = ByteBuffer.allocateDirect(compressed.length)
+      src.put(compressed)
+      src.flip
+
+      val ddict = new ZstdDictDecompress(dict)
+      val zis   = new ZstdDirectBufferDecompressingStreamNoFinalizer(src)
+      zis.setDict(ddict)
+      // the stream references the native DDict, so freeing it while the
+      // stream is still open must be refused (use after free otherwise)
+      intercept[IllegalStateException] {
+        ddict.close
+      }
+      val output = decompressDirectBufferStream(zis)
+      zis.close
+      // closing the stream releases the dict
+      ddict.close
+      assert(input.toSeq == output.toSeq)
+    }
+
+    it should s"release the previous fast dict when a ZstdDirectBufferDecompressingStream switches dicts with legacy $legacy" in {
+      val compressed = Zstd.compressUsingDict(input, dict2, 1)
+      val src        = ByteBuffer.allocateDirect(compressed.length)
+      src.put(compressed)
+      src.flip
+
+      val ddict  = new ZstdDictDecompress(dict)
+      val ddict2 = new ZstdDictDecompress(dict2)
+      val zis    = new ZstdDirectBufferDecompressingStreamNoFinalizer(src)
+      zis.setDict(ddict)
+      zis.setDict(ddict2)
+      // the first dict is no longer referenced by the stream
+      ddict.close
+      // the active one is still in use
+      intercept[IllegalStateException] {
+        ddict2.close
+      }
+      val output = decompressDirectBufferStream(zis)
+      zis.close
+      ddict2.close
+      assert(input.toSeq == output.toSeq)
+    }
+
+    it should s"keep all fast dicts alive while a ZstdInputStream references multiple dicts with legacy $legacy" in {
+      val cdict  = new ZstdDictCompress(dict, 0, dict.length, 1)
+      val cdict2 = new ZstdDictCompress(dict2, 0, dict2.length, 1)
+      val compressed = compressWithDict(cdict) ++ compressWithDict(cdict2)
+      cdict.close
+      cdict2.close
+
+      val ddict  = new ZstdDictDecompress(dict)
+      val ddict2 = new ZstdDictDecompress(dict2)
+      val zis    = new ZstdInputStreamNoFinalizer(new ByteArrayInputStream(compressed))
+      zis.setRefMultipleDDicts(true)
+      zis.setDict(ddict)
+      zis.setDict(ddict2)
+      // the native stream references both DDicts, freeing any of them
+      // while the stream is still open must be refused
+      intercept[IllegalStateException] {
+        ddict.close
+      }
+      intercept[IllegalStateException] {
+        ddict2.close
+      }
+      // disabling multiple dict references does not drop the dicts registered
+      // in the native stream, they are used again once re-enabled
+      zis.setRefMultipleDDicts(false)
+      intercept[IllegalStateException] {
+        ddict.close
+      }
+      zis.setRefMultipleDDicts(true)
+      val output = readFully(zis)
+      zis.close
+      // closing the stream releases all the dicts
+      ddict.close
+      ddict2.close
+      assert((input ++ input).toSeq == output.toSeq)
+    }
   }
 
   // offset/length pairs that point outside of a 16 bytes dictionary buffer
@@ -534,6 +914,10 @@ class ZstdDictSpec extends AnyFlatSpec {
     val dict  = train(false, 512)
     val ddict = new ZstdDictDecompress(dict)
     zis.setDict(ddict)
+    // the stream references the native DDict until it is closed
+    intercept[IllegalStateException] {
+      ddict.close
+    }
     zis.close
     // a closed stream has nothing left to read
     assert(!zis.hasRemaining)
