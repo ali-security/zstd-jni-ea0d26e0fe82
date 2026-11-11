@@ -1451,4 +1451,22 @@ class ZstdSpec extends AnyFlatSpec with ScalaCheckPropertyChecks {
       assertRejected(query(slice, -1, 1))
     }
   }
+
+  "ZstdInputStream.read(buf, offset, len)" should "reject a negative length instead of looping forever" in {
+    val compressed = Zstd.compress("negative length".getBytes(Charset.forName("UTF-8")))
+    val buf = new Array[Byte](100)
+    val zis = new ZstdInputStream(new ByteArrayInputStream(compressed))
+    assertThrows[IndexOutOfBoundsException] {
+      zis.read(buf, 0, -1)
+    }
+    zis.close()
+    val zisNoFinalizer = new ZstdInputStreamNoFinalizer(new ByteArrayInputStream(compressed))
+    assertThrows[IndexOutOfBoundsException] {
+      zisNoFinalizer.read(buf, 0, -1)
+    }
+    assertThrows[IndexOutOfBoundsException] {
+      zisNoFinalizer.read(buf, 10, Int.MinValue)
+    }
+    zisNoFinalizer.close()
+  }
 }
