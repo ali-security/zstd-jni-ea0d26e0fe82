@@ -1412,4 +1412,43 @@ class ZstdSpec extends AnyFlatSpec with ScalaCheckPropertyChecks {
       }
     }.get
   }
+
+  "direct ByteBuffer frame size" should "reject offset and size outside of the buffer" in {
+    val input = "frame size bounds check".getBytes(Charset.forName("UTF-8"))
+    val compressed = Zstd.compress(input)
+    // [pad][frame][pad]: the frame starts at offset 1 and the buffer is one byte larger than the frame
+    val buf = ByteBuffer.allocateDirect(compressed.length + 2)
+    buf.position(1)
+    buf.put(compressed)
+    buf.clear()
+
+    val sizeQueries: List[(ByteBuffer, Int, Int) => Long] = List(
+      (b, off, len) => Zstd.getDirectByteBufferFrameContentSize(b, off, len),
+      (b, off, len) => Zstd.decompressedDirectByteBufferSize(b, off, len)
+    )
+
+    def assertRejected(res: Long): Unit = {
+      assert(Zstd.isError(res))
+      assert(Zstd.getErrorCode(res) == Zstd.errGeneric())
+    }
+
+    for (query <- sizeQueries) {
+      // in-bounds queries still work
+      assert(query(buf, 1, compressed.length) == input.length)
+      assert(query(buf, 1, compressed.length + 1) == input.length)
+      // offset + size past the end of the buffer
+      assertRejected(query(buf, 2, compressed.length + 1))
+      // offset + size overflowing a 32-bit int must not wrap around the bounds check
+      assertRejected(query(buf, 1, Int.MaxValue))
+      // negative size must not be turned into a huge size_t
+      assertRejected(query(buf, 1, -1))
+      assertRejected(query(buf, 1, -compressed.length))
+      // negative offset must not read before the start of the buffer
+      buf.position(2)
+      val slice = buf.slice()
+      buf.clear()
+      assertRejected(query(slice, -1, compressed.length))
+      assertRejected(query(slice, -1, 1))
+    }
+  }
 }
