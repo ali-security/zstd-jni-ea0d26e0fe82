@@ -1469,4 +1469,21 @@ class ZstdSpec extends AnyFlatSpec with ScalaCheckPropertyChecks {
     }
     zisNoFinalizer.close()
   }
+
+  "Zstd.getFrameContentSize(src, pos, size, magicless)" should "reject negative or overflowing position/size" in {
+    val compressed = Zstd.compress("frame content size".getBytes(Charset.forName("UTF-8")))
+    assertThrows[ArrayIndexOutOfBoundsException] {
+      Zstd.getFrameContentSize(compressed, -1, compressed.length, false)
+    }
+    assertThrows[ArrayIndexOutOfBoundsException] {
+      Zstd.getFrameContentSize(compressed, 0, -1, false)
+    }
+    assertThrows[ArrayIndexOutOfBoundsException] {
+      Zstd.getFrameContentSize(compressed, 1, Int.MaxValue, false)
+    }
+    assertThrows[ArrayIndexOutOfBoundsException] {
+      Zstd.decompressedSize(compressed, 1, Int.MaxValue, false)
+    }
+    assert(Zstd.getFrameContentSize(compressed, 0, compressed.length, false) == 18)
+  }
 }

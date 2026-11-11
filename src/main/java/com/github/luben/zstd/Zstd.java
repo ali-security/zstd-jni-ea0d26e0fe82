@@ -629,10 +629,10 @@ public class Zstd {
      *         negative if there is an error decoding the frame header
      */
     public static long getFrameContentSize(byte[] src, int srcPosition, int srcSize, boolean magicless) {
-        if (srcPosition >= src.length) {
+        if (srcPosition < 0 || srcPosition >= src.length) {
             throw new ArrayIndexOutOfBoundsException(srcPosition);
         }
-        if (srcPosition + srcSize > src.length) {
+        if (srcSize < 0 || srcSize > src.length - srcPosition) {
             throw new ArrayIndexOutOfBoundsException(srcPosition + srcSize);
         }
         return getFrameContentSize0(src, srcPosition, srcSize, magicless);
@@ -657,7 +657,7 @@ public class Zstd {
         if (srcPosition >= src.length) {
             throw new ArrayIndexOutOfBoundsException(srcPosition);
         }
-        if (srcPosition + srcSize > src.length) {
+        if (srcSize > src.length - srcPosition) {
             throw new ArrayIndexOutOfBoundsException(srcPosition + srcSize);
         }
         return decompressedSize0(src, srcPosition, srcSize, magicless);
